@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
-"""CIFAR example using input pipelines."""
+"""Read RESNET data as TFRecords and create a tf.data.Dataset."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -26,25 +25,30 @@ import tensorflow as tf
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('cifar_train_data_file', 'gs://ptosis-test/data/train-00000-of-00001',
-                    'Path to CIFAR10 training data.')
-flags.DEFINE_string('cifar_test_data_file', 'gs://ptosis-test/data/validation-00000-of-00001', 'Path to CIFAR10 test data.')
+flags.DEFINE_string('cifar_train_data_file', 'gs://ptosis-test/data/train-00000-of-00001', 'Training .tfrecord data file')
+flags.DEFINE_string('cifar_test_data_file', 'gs://ptosis-test/data/validation-00000-of-00001', 'Test .tfrecord data file')
+
+NUM_TRAIN_IMAGES = 669
+NUM_EVAL_IMAGES = 335
 
 
 def parser(serialized_example):
-  """Parses a single tf.Example into image and label tensors."""
+  """Parses a single Example into image and label tensors."""
   features = tf.parse_single_example(
       serialized_example,
-      features= {
-          'image': tf.FixedLenFeature((), tf.string, ''),
-          'label': tf.FixedLenFeature([], tf.int64)
+      features={
+          'image_raw': tf.FixedLenFeature([], tf.string),
+          'label': tf.FixedLenFeature([], tf.int64)   # label is unused
       })
-  image = tf.decode_raw(features['image'], tf.uint8)
-  image.set_shape([3*64*64])
-  # Normalize the values of the image from the range [0, 255] to [-1.0, 1.0]
+  image = tf.decode_raw(features['image_raw'], tf.uint8)
+  image.set_shape([3 * 64 * 64])
+
+    # Normalize the values of the image from [0, 255] to [-1.0, 1.0]
   image = tf.cast(image, tf.float32) * (2.0 / 255) - 1.0
-  image = tf.transpose(tf.reshape(image, [3, 64*64]))
-  label = tf.cast(features['label'], tf.int32)
+  
+  image = tf.reshape(image, [64, 64, 3])
+
+  label = tf.cast(tf.reshape(features['label'], shape=[]), dtype=tf.int32)
   return image, label
 
 
@@ -58,13 +62,18 @@ class InputFunction(object):
                       else FLAGS.cifar_test_data_file)
 
   def __call__(self, params):
+    """Creates a simple Dataset pipeline."""
+
     batch_size = params['batch_size']
     dataset = tf.data.TFRecordDataset(self.data_file)
-    dataset = dataset.map(parser, num_parallel_calls=batch_size)
-    dataset = dataset.prefetch(4 * batch_size).cache().repeat()
+    dataset = dataset.map(parser).cache()
+    if self.is_training:
+      dataset = dataset.repeat()
+    dataset = dataset.shuffle(1024)
+    dataset = dataset.prefetch(batch_size)
     dataset = dataset.apply(
         tf.contrib.data.batch_and_drop_remainder(batch_size))
-    dataset = dataset.prefetch(2)
+    dataset = dataset.prefetch(2)    # Prefetch overlaps in-feed with training
     images, labels = dataset.make_one_shot_iterator().get_next()
 
     # Reshape to give inputs statically known shapes.
@@ -81,5 +90,6 @@ class InputFunction(object):
 
 def convert_array_to_image(array):
   """Converts a numpy array to a PIL Image and undoes any rescaling."""
+  array = array[:, :, 0]
   img = Image.fromarray(np.uint8((array + 1.0) / 2.0 * 255), mode='RGB')
   return img
